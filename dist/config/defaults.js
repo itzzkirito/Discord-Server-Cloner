@@ -7,7 +7,7 @@ export const defaultClonerOptions = {
     cloneVoiceStates: false,
 };
 export const defaultRateLimitConfig = {
-    delay: 1000,
-    maxConcurrentRequests: 5,
+    delay: 0, // No delay for fast cloning
+    maxConcurrentRequests: 50, // Maximum concurrency for extreme speed
 };
 //# sourceMappingURL=defaults.js.map

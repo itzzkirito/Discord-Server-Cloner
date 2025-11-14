@@ -24,13 +24,12 @@ interface RateLimitError extends Error {
 export class RateLimiter {
   private queue: Array<() => Promise<any>> = [];
   private running = 0;
-  private delay: number;
   private maxConcurrent: number;
   private maxRetries: number = 5;
-  private baseRetryDelay: number = 1000;
+  private baseRetryDelay: number = 500; // Reduced from 1000ms to 500ms for faster retries
 
   constructor(config: RateLimitConfig) {
-    this.delay = config.delay;
+    // Delay is no longer used - all operations run at maximum speed
     this.maxConcurrent = config.maxConcurrentRequests;
   }
 
@@ -84,8 +83,8 @@ export class RateLimiter {
         // Wait for the retry-after period
         await this.sleep(retryAfter);
 
-        // Retry with exponential backoff
-        const backoffDelay = this.baseRetryDelay * Math.pow(2, retryCount);
+        // Retry with reduced exponential backoff for faster recovery
+        const backoffDelay = Math.min(this.baseRetryDelay * Math.pow(1.5, retryCount), 2000); // Max 2s instead of unlimited
         await this.sleep(backoffDelay);
 
         return this.executeWithRetry(fn, retryCount + 1);
@@ -183,29 +182,26 @@ export class RateLimiter {
   }
 
   private async processQueue(): Promise<void> {
-    if (this.running >= this.maxConcurrent || this.queue.length === 0) {
-      return;
-    }
+    // Process multiple tasks in parallel up to maxConcurrent
+    while (this.running < this.maxConcurrent && this.queue.length > 0) {
+      const task = this.queue.shift();
+      if (!task) break;
 
-    this.running++;
-    const task = this.queue.shift();
-    if (!task) {
-      this.running--;
-      return;
-    }
-
-    try {
-      await task();
-    } finally {
-      this.running--;
-      await new Promise((resolve) => setTimeout(resolve, this.delay));
-      this.processQueue();
+      this.running++;
+      
+      // Execute task immediately without waiting
+      task().finally(() => {
+        this.running--;
+        // Immediately process next task
+        setImmediate(() => this.processQueue());
+      });
     }
   }
 
   async waitForCompletion(): Promise<void> {
+    // Ultra-fast polling for completion using setImmediate
     while (this.queue.length > 0 || this.running > 0) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise<void>((resolve) => setImmediate(resolve)); // Use setImmediate for instant polling
     }
   }
 }

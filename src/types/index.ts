@@ -2,6 +2,7 @@ export interface ClonerConfig {
   sourceToken: string;
   targetToken: string;
   proxy?: ProxyConfig;
+  proxies?: ProxyConfig[];
   options: ClonerOptions;
   rateLimit: RateLimitConfig;
 }

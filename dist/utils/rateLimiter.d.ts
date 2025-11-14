@@ -2,7 +2,6 @@ import type { RateLimitConfig } from '../types/index.js';
 export declare class RateLimiter {
     private queue;
     private running;
-    private delay;
     private maxConcurrent;
     private maxRetries;
     private baseRetryDelay;

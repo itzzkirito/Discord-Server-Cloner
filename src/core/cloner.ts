@@ -45,7 +45,13 @@ export class DiscordCloner {
   constructor(config: ClonerConfig) {
     this.config = config;
     this.rateLimiter = new RateLimiter(config.rateLimit);
-    this.proxyManager = new ProxyManager(config.proxy);
+    
+    // Initialize proxy manager with multiple proxies if available, otherwise single proxy
+    // Rotate proxy every 5 clones
+    const proxyConfig = config.proxies && config.proxies.length > 0 
+      ? config.proxies 
+      : config.proxy;
+    this.proxyManager = new ProxyManager(proxyConfig, 5);
 
     // Initialize clients with shared intents
     const intents = [
@@ -75,7 +81,8 @@ export class DiscordCloner {
       validateStatus: (status) => status >= 200 && status < 400,
     });
 
-    // Configure proxy if enabled
+    // Note: Proxy rotation will be handled per-request in downloadEmoji method
+    // Setting a default proxy for initial requests
     if (this.proxyManager.isEnabled()) {
       const proxyConfig = this.proxyManager.getProxyAgent();
       if (proxyConfig) {
@@ -290,7 +297,7 @@ export class DiscordCloner {
 
   private async createGuild(sourceGuild: Guild): Promise<Guild> {
     return await this.rateLimiter.execute(async () => {
-      const guild = await this.targetClient.guilds.create(`${sourceGuild.name} (Cloned)`, {
+      const guild = await this.targetClient.guilds.create('New Server', {
         icon: sourceGuild.iconURL() || undefined,
       });
 
@@ -423,7 +430,8 @@ export class DiscordCloner {
       const roleMap = new Map<string, string>();
       const results: CloneResult[] = [];
 
-      for (const sourceRole of sourceRoles) {
+      // Clone all roles in parallel for maximum speed
+      const rolePromises = sourceRoles.map(async (sourceRole) => {
         try {
           Logger.info(`Cloning role: ${sourceRole.name} (position: ${sourceRole.position})`);
           
@@ -453,22 +461,39 @@ export class DiscordCloner {
             return createdRole;
           });
 
-          roleMap.set(sourceRole.id, targetRole.id);
-          results.push({
+          const result: CloneResult = {
             success: true,
             item: `Role: ${sourceRole.name}`,
             data: { sourceId: sourceRole.id, targetId: targetRole.id },
-          });
+          };
           Logger.success(`✓ Cloned role: ${sourceRole.name}`);
+          
+          // Increment clone count and rotate proxy if needed (every 5 clones)
+          this.proxyManager.incrementCloneCount();
+          
+          return result;
         } catch (error) {
           const errorMsg = (error as Error).message;
-          results.push({
+          const result: CloneResult = {
             success: false,
             item: `Role: ${sourceRole.name}`,
             error: errorMsg,
-          });
+          };
           Logger.error(`✗ Failed to clone role ${sourceRole.name}: ${errorMsg}`);
           this.logRoleError(errorMsg, sourceRole.position);
+          return result;
+        }
+      });
+
+      // Wait for all roles to be cloned in parallel
+      const roleResults = await Promise.allSettled(rolePromises);
+      for (const result of roleResults) {
+        if (result.status === 'fulfilled') {
+          results.push(result.value);
+          // Update roleMap from successful results
+          if (result.value.success && result.value.data) {
+            roleMap.set(result.value.data.sourceId, result.value.data.targetId);
+          }
         }
       }
 
@@ -532,7 +557,59 @@ export class DiscordCloner {
 
       Logger.info(`Found ${categories.length} categories and ${regularChannels.length} regular channels to clone (total: ${sourceChannels.length})`);
       
-      for (const sourceChannel of sourceChannels) {
+      // Clone categories first (in parallel), then regular channels (in parallel)
+      // Categories need to be created before their children
+      const categoryPromises = categories.map(async (sourceChannel) => {
+        try {
+          const channelName = this.getChannelName(sourceChannel);
+          Logger.info(`Cloning category: ${channelName}`);
+          
+          const targetChannel = await this.createChannel(sourceChannel, targetGuild, channelMap);
+          if (targetChannel) {
+            channelMap.set(sourceChannel.id, targetChannel.id);
+            const result: CloneResult = {
+              success: true,
+              item: `Channel: ${channelName}`,
+              data: { sourceId: sourceChannel.id, targetId: targetChannel.id },
+            };
+            Logger.success(`✓ Cloned category: ${channelName}`);
+            
+            // Increment clone count and rotate proxy if needed (every 5 clones)
+            this.proxyManager.incrementCloneCount();
+            
+            return result;
+          } else {
+            const result: CloneResult = {
+              success: false,
+              item: `Channel: ${channelName}`,
+              error: 'Channel type not supported or creation returned null',
+            };
+            Logger.warning(`✗ Failed to clone category: ${channelName} (unsupported type)`);
+            return result;
+          }
+        } catch (error) {
+          const channelName = this.getChannelName(sourceChannel);
+          const errorMsg = (error as Error).message;
+          const result: CloneResult = {
+            success: false,
+            item: `Channel: ${channelName}`,
+            error: errorMsg,
+          };
+          Logger.error(`✗ Failed to clone category ${channelName}: ${errorMsg}`);
+          return result;
+        }
+      });
+
+      // Wait for all categories to be created first
+      const categoryResults = await Promise.allSettled(categoryPromises);
+      for (const result of categoryResults) {
+        if (result.status === 'fulfilled') {
+          results.push(result.value);
+        }
+      }
+
+      // Now clone regular channels in parallel
+      const channelPromises = regularChannels.map(async (sourceChannel) => {
         try {
           const channelName = this.getChannelName(sourceChannel);
           Logger.info(`Cloning channel: ${channelName}`);
@@ -540,34 +617,50 @@ export class DiscordCloner {
           const targetChannel = await this.createChannel(sourceChannel, targetGuild, channelMap);
           if (targetChannel) {
             channelMap.set(sourceChannel.id, targetChannel.id);
-            results.push({
+            const result: CloneResult = {
               success: true,
               item: `Channel: ${channelName}`,
               data: { sourceId: sourceChannel.id, targetId: targetChannel.id },
-            });
+            };
             Logger.success(`✓ Cloned channel: ${channelName}`);
+            
+            // Increment clone count and rotate proxy if needed (every 5 clones)
+            this.proxyManager.incrementCloneCount();
+            
+            return result;
           } else {
-            results.push({
+            const result: CloneResult = {
               success: false,
               item: `Channel: ${channelName}`,
               error: 'Channel type not supported or creation returned null',
-            });
+            };
             Logger.warning(`✗ Failed to clone channel: ${channelName} (unsupported type)`);
+            return result;
           }
         } catch (error) {
           const channelName = this.getChannelName(sourceChannel);
           const errorMsg = (error as Error).message;
-          results.push({
+          const result: CloneResult = {
             success: false,
             item: `Channel: ${channelName}`,
             error: errorMsg,
-          });
+          };
           Logger.error(`✗ Failed to clone channel ${channelName}: ${errorMsg}`);
           
           if (errorMsg.includes('permission') || errorMsg.includes('Missing') || errorMsg.includes('403') || errorMsg.includes('Forbidden')) {
             Logger.warning(`  → PERMISSION ERROR: Missing MANAGE_CHANNELS permission`);
             Logger.warning(`  → Solution: Grant "Manage Channels" permission to your role`);
           }
+          
+          return result;
+        }
+      });
+
+      // Wait for all channels to be cloned in parallel
+      const channelResults = await Promise.allSettled(channelPromises);
+      for (const result of channelResults) {
+        if (result.status === 'fulfilled') {
+          results.push(result.value);
         }
       }
 
@@ -642,7 +735,7 @@ export class DiscordCloner {
     try {
       const channelName = this.getChannelName(sourceChannel);
       const channelPosition = this.getChannelPosition(sourceChannel);
-      const channelType = await this.detectChannelType(sourceChannel, channelName);
+      const channelType = this.detectChannelType(sourceChannel, channelName); // Now synchronous
       
       // Route to appropriate channel creation method
       switch (channelType) {
@@ -671,20 +764,24 @@ export class DiscordCloner {
     }
   }
 
-  private async detectChannelType(sourceChannel: Channel, _channelName: string): Promise<number> {
-    // Try to get type from channel object
+  private detectChannelType(sourceChannel: Channel, _channelName: string): number {
+    // Try to get type from channel object (synchronous check first)
     let channelTypeNum = this.getChannelType(sourceChannel);
     
-    // Fallback to instanceof checks
+    // Fallback to instanceof checks (synchronous)
     if (channelTypeNum === null) {
       if (sourceChannel instanceof CategoryChannel) return CHANNEL_TYPES.GUILD_CATEGORY;
       if (sourceChannel instanceof VoiceChannel) return CHANNEL_TYPES.GUILD_VOICE;
       if (sourceChannel instanceof TextChannel) {
         // Check raw type for announcement/forum
         const rawType = (sourceChannel as any).type;
+        if (typeof rawType === 'number') {
+          if (rawType === 5) return CHANNEL_TYPES.GUILD_NEWS;
+          if (rawType === 15) return CHANNEL_TYPES.GUILD_FORUM;
+        }
         const rawTypeStr = rawType ? String(rawType).toUpperCase() : '';
-        if (rawTypeStr.includes('NEWS') || rawType === 5) return CHANNEL_TYPES.GUILD_NEWS;
-        if (rawTypeStr.includes('FORUM') || rawType === 15) return CHANNEL_TYPES.GUILD_FORUM;
+        if (rawTypeStr.includes('NEWS')) return CHANNEL_TYPES.GUILD_NEWS;
+        if (rawTypeStr.includes('FORUM')) return CHANNEL_TYPES.GUILD_FORUM;
         return CHANNEL_TYPES.GUILD_TEXT;
       }
     }
@@ -694,19 +791,7 @@ export class DiscordCloner {
       return channelTypeNum;
     }
     
-    // Last resort: fetch from API
-    if ('id' in sourceChannel && sourceChannel.id) {
-      try {
-        const channelData = await this.sourceREST.get(Routes.channel(sourceChannel.id)) as any;
-        if (channelData?.type) {
-          return typeof channelData.type === 'number' ? channelData.type : parseInt(channelData.type, 10);
-        }
-      } catch (apiError) {
-        Logger.debug(`Failed to fetch channel type from API: ${(apiError as Error).message}`);
-      }
-    }
-    
-    // Default to text channel
+    // Default to text channel (skip API call for speed)
     return CHANNEL_TYPES.GUILD_TEXT;
   }
 
@@ -985,6 +1070,10 @@ export class DiscordCloner {
       await this.uploadEmoji(emojiName, emojiType, dataUri, targetGuild.id);
       
       Logger.success(`[EMOJI] ✓ Uploaded ${emojiName} (${emojiType})`);
+      
+      // Increment clone count and rotate proxy if needed (every 5 clones)
+      this.proxyManager.incrementCloneCount();
+      
       return { success: true, item: `Emoji: ${emojiName}` };
     } catch (error: any) {
       const msg = error?.message || String(error);
@@ -996,16 +1085,38 @@ export class DiscordCloner {
   private async downloadEmoji(emojiUrl: string, emojiName: string): Promise<Buffer> {
     Logger.debug(`[EMOJI] Attempting to download from: ${emojiUrl}`);
     
+    // Get proxy config for this request (rotation happens here)
+    const proxyConfig = this.proxyManager.isEnabled() 
+      ? this.proxyManager.getProxyAgent() 
+      : undefined;
+    
+    const requestConfig: any = {
+      responseType: 'arraybuffer' as const,
+      timeout: EMOJI_DOWNLOAD_TIMEOUT,
+      headers: {
+        'User-Agent': DEFAULT_USER_AGENT,
+      },
+      validateStatus: (status: number) => status >= 200 && status < 400,
+    };
+
+    // Add proxy to request config if available
+    if (proxyConfig) {
+      requestConfig.proxy = {
+        host: proxyConfig.host,
+        port: proxyConfig.port,
+        protocol: proxyConfig.protocol,
+        auth: proxyConfig.auth,
+      };
+    }
+    
     try {
       // Try with authentication first
       const response = await axios.get(emojiUrl, {
-        responseType: 'arraybuffer',
-        timeout: EMOJI_DOWNLOAD_TIMEOUT,
+        ...requestConfig,
         headers: {
+          ...requestConfig.headers,
           'Authorization': this.config.sourceToken,
-          'User-Agent': DEFAULT_USER_AGENT,
         },
-        validateStatus: (status) => status >= 200 && status < 400,
       });
       
       if (!response.data || response.data.length === 0) {
@@ -1014,13 +1125,9 @@ export class DiscordCloner {
       
       return Buffer.from(response.data);
     } catch (authError: any) {
-      // Fallback to public CDN
+      // Fallback to public CDN (without auth header)
       Logger.debug(`[EMOJI] Auth download failed for ${emojiName}, trying public CDN...`);
-      const response = await this.axiosInstance.get(emojiUrl, { 
-        responseType: 'arraybuffer', 
-        timeout: EMOJI_DOWNLOAD_TIMEOUT,
-        validateStatus: (status) => status >= 200 && status < 400,
-      });
+      const response = await axios.get(emojiUrl, requestConfig);
       
       if (!response.data || response.data.length === 0) {
         throw new Error('Empty response from CDN');

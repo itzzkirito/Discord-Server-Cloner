@@ -80,8 +80,19 @@ export function loadConfig() {
     }
     // Log token info (masked) for verification
     Logger.info(`Tokens loaded successfully (SOURCE: ${maskToken(sourceToken)}, TARGET: ${maskToken(targetToken)})`);
+    // Parse proxies - support both single proxy and multiple proxies
     let proxy;
-    if (process.env.PROXY_HOST && process.env.PROXY_PORT) {
+    let proxies;
+    // Check for multiple proxies (PROXY_LIST or PROXIES)
+    const proxyList = process.env.PROXY_LIST || process.env.PROXIES;
+    if (proxyList) {
+        proxies = parseProxyList(proxyList);
+        if (proxies.length > 0) {
+            Logger.info(`Loaded ${proxies.length} proxy/proxies from PROXY_LIST`);
+        }
+    }
+    // Fallback to single proxy configuration (backward compatibility)
+    if (!proxies && process.env.PROXY_HOST && process.env.PROXY_PORT) {
         proxy = {
             host: process.env.PROXY_HOST,
             port: parseInt(process.env.PROXY_PORT, 10),
@@ -99,15 +110,66 @@ export function loadConfig() {
         cloneVoiceStates: process.env.CLONE_VOICE_STATES === 'true',
     };
     const rateLimit = {
-        delay: parseInt(process.env.RATE_LIMIT_DELAY || '1000', 10),
-        maxConcurrentRequests: parseInt(process.env.MAX_CONCURRENT_REQUESTS || '5', 10),
+        delay: parseInt(process.env.RATE_LIMIT_DELAY || '0', 10), // Default 0 for fast cloning
+        maxConcurrentRequests: parseInt(process.env.MAX_CONCURRENT_REQUESTS || '50', 10), // Default 50 for extreme speed
     };
     return {
         sourceToken,
         targetToken,
         proxy,
+        proxies,
         options: { ...defaultClonerOptions, ...options },
         rateLimit: { ...defaultRateLimitConfig, ...rateLimit },
     };
+}
+/**
+ * Parse proxy list from string format: IP:PORT:USERNAME:PASSWORD
+ * Supports multiple formats:
+ * - One per line (newline separated)
+ * - Comma separated
+ * - Semicolon separated
+ */
+function parseProxyList(proxyList) {
+    const proxies = [];
+    // Split by newline, comma, or semicolon
+    const lines = proxyList
+        .split(/[\n,;]/)
+        .map(line => line.trim())
+        .filter(line => line.length > 0);
+    for (const line of lines) {
+        try {
+            // Format: IP:PORT:USERNAME:PASSWORD or IP:PORT
+            const parts = line.split(':');
+            if (parts.length < 2) {
+                Logger.warning(`Invalid proxy format (skipping): ${line}`);
+                continue;
+            }
+            const host = parts[0].trim();
+            const port = parseInt(parts[1].trim(), 10);
+            if (!host || isNaN(port) || port < 1 || port > 65535) {
+                Logger.warning(`Invalid proxy host/port (skipping): ${line}`);
+                continue;
+            }
+            const proxy = {
+                host,
+                port,
+                protocol: 'http', // Default to http
+            };
+            // If username and password are provided
+            if (parts.length >= 4) {
+                proxy.username = parts[2].trim();
+                proxy.password = parts[3].trim();
+            }
+            else if (parts.length === 3) {
+                // If only 3 parts, assume it's username (password might be empty)
+                proxy.username = parts[2].trim();
+            }
+            proxies.push(proxy);
+        }
+        catch (error) {
+            Logger.warning(`Error parsing proxy line "${line}": ${error.message}`);
+        }
+    }
+    return proxies;
 }
 //# sourceMappingURL=loader.js.map

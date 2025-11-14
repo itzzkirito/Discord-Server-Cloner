@@ -10,7 +10,7 @@ export const defaultClonerOptions: ClonerOptions = {
 };
 
 export const defaultRateLimitConfig: RateLimitConfig = {
-  delay: 1000,
-  maxConcurrentRequests: 5,
+  delay: 0, // No delay for fast cloning
+  maxConcurrentRequests: 50, // Maximum concurrency for extreme speed
 };
 
